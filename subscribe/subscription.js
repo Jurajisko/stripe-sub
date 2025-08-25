@@ -357,218 +357,62 @@ jQuery(document).on('change', 'input[name="subscription_type"]', function() {
     updateSelectedSubscribeText();
 });
 
-
 /* ===== OPPIO 3DS FAIL PATCH – vložené na konci subscription.js ===== */
-// window.OppioSubscription = (function () {
-//   function handleServerResponse(resp) {
-//     try {
-//       if (typeof resp === 'string') resp = JSON.parse(resp);
-//     } catch (e) {}
-
-//     // Bez odpovede – nič nerobíme
-//     if (!resp) return;
-
-//     // 1) 3DS zlyhalo: PaymentIntent je requires_payment_method → nerobíme žiadne ďalšie confirm,
-//     //    hneď presmerujeme na "order-pay" (Woo si vytvorí NOVÝ PaymentIntent)
-//     if (resp.status === 'requires_payment_method') {
-//       console.log('[OPPIO] requires_payment_method → presun na pay stránku', resp);
-//       if (resp.retry_url) {
-//         window.location.href = resp.retry_url;
-//         return;
-//       }
-//       alert('Platba bola zamietnutá pri 3D Secure. Skúste prosím zaplatiť znova s novou kartou.');
-//       window.location.reload();
-//       return;
-//     }
-
-//     // 2) 3DS treba dokončiť (challenge)
-//     if (resp.requires_action && resp.client_secret) {
-//       console.log('[OPPIO] requires_action → spúšťam confirmCardPayment');
-//       if (typeof window.Stripe !== 'function') {
-//         alert('Chýba Stripe.js. Skúste prosím obnoviť stránku.');
-//         return;
-//       }
-//       // Ak už niekde inicializuješ Stripe(publishableKey), použi ho.
-//       // Inak sa pokúsime zobrať existujúci objekt, ktorý si vytvoril plugin.
-//       var stripe = window.stripe || (window.oppioStripePk ? Stripe(window.oppioStripePk) : null);
-//       if (!stripe) {
-//         // Posledný fallback – ak máš globálny publishable key v inej premennej, doplň sem
-//         alert('Stripe nie je inicializovaný. Skúste prosím znova.');
-//         return;
-//       }
-
-//       stripe.confirmCardPayment(resp.client_secret).then(function (result) {
-//         if (result.error) {
-//           // 3DS zlyhalo počas challenge – pošli užívateľa na nový pokus
-//           console.log('[OPPIO] 3DS challenge error', result.error);
-//           if (resp.retry_url) {
-//             window.location.href = resp.retry_url;
-//           } else {
-//             alert('Overenie 3D Secure zlyhalo. Skúste zaplatiť znova s novou kartou.');
-//             window.location.reload();
-//           }
-//           return;
-//         }
-//         // 3DS dopadlo OK – presmeruj na thank-you alebo refresh
-//         console.log('[OPPIO] 3DS hotovo', result.paymentIntent && result.paymentIntent.status);
-//         if (resp.success_url) {
-//           window.location.href = resp.success_url;
-//         } else {
-//           window.location.reload();
-//         }
-//       });
-
-//       return;
-//     }
-
-//     // 3) Bežný úspech (bez 3DS) alebo server chce redirect
-//     if (resp.redirect) {
-//       window.location.href = resp.redirect;
-//       return;
-//     }
-//     if (resp.success) {
-//       // ak máš vlastnú success URL, server ju môže poslať ako success_url
-//       if (resp.success_url) {
-//         window.location.href = resp.success_url;
-//       } else {
-//         window.location.reload();
-//       }
-//       return;
-//     }
-
-//     // Fallback – nič špeciálne
-//     console.log('[OPPIO] neznáma odpoveď', resp);
-//   }
-
-//   return { handleServerResponse: handleServerResponse };
-// })();
-
 window.OppioSubscription = (function () {
   function handleServerResponse(resp) {
-    try {
-      if (typeof resp === 'string') resp = JSON.parse(resp);
-    } catch (e) {}
-    
-    // Bez odpovede – nič nerobíme
+    try { if (typeof resp === 'string') resp = JSON.parse(resp); } catch (e) {}
     if (!resp) return;
-    
-    // 1) 3DS zlyhalo: PaymentIntent je requires_payment_method → nerobíme žiadne ďalšie confirm,
-    //    hneď presmerujeme na "order-pay" (Woo si vytvorí NOVÝ PaymentIntent)
-    if (resp.status === 'requires_payment_method') {
-      console.log('[OPPIO] requires_payment_method → presun na pay stránku', resp);
-      if (resp.retry_url) {
-        window.location.href = resp.retry_url;
-        return;
-      }
-      
-      // ✅ NAHRADENÝ ALERT
-      showErrorMessage('Platba bola zamietnutá pri 3D Secure overení. Potrebujete použiť novú kartu.');
-      
-      // Pridaj tlačidlo pre reload do error message funkcie ak ho tam nemáš
-      setTimeout(() => {
-        window.location.reload();
-      }, 5000);
+
+    // 3DS zlyhalo – PaymentIntent == requires_payment_method
+    if (resp.status === 'requires_payment_method' && resp.retry_url) {
+      showErrorMessage('3D Secure overenie zlyhalo. Skúste znova s novou kartou.');
+      window.location.href = resp.retry_url;
       return;
     }
-    
-    // 2) 3DS treba dokončiť (challenge)
+
+    // 3DS challenge
     if (resp.requires_action && resp.client_secret) {
-      console.log('[OPPIO] requires_action → spúšťam confirmCardPayment');
-      
-      if (typeof window.Stripe !== 'function') {
-        // ✅ NAHRADENÝ ALERT
-        showErrorMessage('Chýba Stripe.js knižnica. Obnovte prosím stránku a skúste znova.');
-        return;
-      }
-      
-      // Ak už niekde inicializuješ Stripe(publishableKey), použi ho.
-      // Inak sa pokúsime zobrať existujúci objekt, ktorý si vytvoril plugin.
       var stripe = window.stripe || (window.oppioStripePk ? Stripe(window.oppioStripePk) : null);
-      
       if (!stripe) {
-        // ✅ NAHRADENÝ ALERT
-        showErrorMessage('Stripe platobný systém nie je inicializovaný. Obnovte stránku a skúste znova.');
+        showErrorMessage('Stripe nebol inicializovaný.');
         return;
       }
-      
-      // Zobraz processing pre 3DS
+
       showProcessingMessage('Prebieha 3D Secure overenie...');
-      
       stripe.confirmCardPayment(resp.client_secret).then(function (result) {
         hideProcessingMessage();
-        
+
         if (result.error) {
-          // 3DS zlyhalo počas challenge – pošli užívateľa na nový pokus
-          console.log('[OPPIO] 3DS challenge error', result.error);
-          
-          if (resp.retry_url) {
-            window.location.href = resp.retry_url;
-          } else {
-            // ✅ NAHRADENÝ ALERT
-            showErrorMessage('3D Secure overenie zlyhalo. Skúste zaplatiť znova s novou kartou.');
-            
-            setTimeout(() => {
-              window.location.reload();
-            }, 5000);
-          }
+          showErrorMessage('3D Secure overenie zlyhalo. Skúste zaplatiť znova.');
+          if (resp.retry_url) window.location.href = resp.retry_url;
           return;
         }
-        
-        // 3DS dopadlo OK – presmeruj na thank-you alebo refresh
-        console.log('[OPPIO] 3DS hotovo', result.paymentIntent && result.paymentIntent.status);
-        
-        showSuccessMessage('3D Secure overenie úspešné! Presmerovávame...');
-        
-        setTimeout(() => {
-          if (resp.success_url) {
-            window.location.href = resp.success_url;
-          } else {
-            window.location.reload();
-          }
-        }, 2000);
-      }).catch(function(error) {
+
+        showSuccessMessage('Platba potvrdená, presmerovávame...');
+        setTimeout(function () {
+          window.location.href = resp.success_url || resp.redirect || window.location.href;
+        }, 1500);
+      }).catch(function (error) {
         hideProcessingMessage();
-        console.error('[OPPIO] 3DS error:', error);
         showErrorMessage('Chyba počas 3D Secure overenia: ' + error.message);
       });
-      
       return;
     }
-    
-    // 3) Bežný úspech (bez 3DS) alebo server chce redirect
+
+    // Úspech bez 3DS
     if (resp.redirect) {
-      showSuccessMessage('Platba úspešná! Presmerovávame...');
-      setTimeout(() => {
-        window.location.href = resp.redirect;
-      }, 1500);
+      window.location.href = resp.redirect;
       return;
     }
-    
+
     if (resp.success) {
-      showSuccessMessage('Platba bola úspešne spracovaná!');
-      
-      setTimeout(() => {
-        // ak máš vlastnú success URL, server ju môže poslať ako success_url
-        if (resp.success_url) {
-          window.location.href = resp.success_url;
-        } else {
-          window.location.reload();
-        }
-      }, 2000);
-      return;
-    }
-    
-    // Fallback – nič špeciálne
-    console.log('[OPPIO] neznáma odpoveď', resp);
-    
-    // Pre neznáme odpovede ukáž warning
-    if (resp.message) {
-      showWarningMessage('Server odpoveď: ' + resp.message);
+      window.location.href = resp.success_url || window.location.href;
     }
   }
-  
+
   return { handleServerResponse: handleServerResponse };
 })();
+
 
 // ✅ HELPER FUNKCIA PRE ERROR MESSAGE S RETRY TLAČIDLOM
 function showError3DS(message, retryUrl = null) {
@@ -644,118 +488,6 @@ jQuery(document).ajaxSuccess(function (evt, xhr, settings) {
 
 // FE pre STRIPE
 // --- OPPIO: Subscription checkout glue ---
-// Spustiť len ak je v hre predplatné (nastav vo WordPresse napr. window.OPPIO_IS_SUBSCRIPTION = true;)
-// (function () {
-//   if (!window.OPPIO_IS_SUBSCRIPTION) return;
-
-//   const pk =
-//     (window.wc_stripe_params && window.wc_stripe_params.key) ||
-//     window.OPPIO_STRIPE_PK; // fallback, ak si ho niekde ukladáš
-//   if (!pk) {
-//     console.error('OPPIO: Missing Stripe publishable key');
-//     return;
-//   }
-
-//   const stripe = Stripe(pk);
-//   const elements = stripe.elements();
-//   // Ak už máš vytvorený <div id="oppio-card-element"> a element inde, použi ho.
-//   // Inak si mountni tu:
-//   if (!document.getElementById('oppio-card-element')) {
-//     const mount = document.createElement('div');
-//     mount.id = 'oppio-card-element';
-//     document.querySelector('form.checkout')?.prepend(mount);
-//   }
-//   const card = elements.create('card');
-//   card.mount('#oppio-card-element');
-
-//   const $ = window.jQuery;
-//   const $form = $('form.checkout');
-//   const $placeOrder = $('#place_order');
-//   const $err = $('#oppio-card-errors');
-
-//   const getVal = (sel) => (document.querySelector(sel)?.value || '').trim();
-//   const showErr = (m) => {
-//     if ($err.length) $err.text(m || 'Chyba platby.');
-//     else alert(m || 'Chyba platby.');
-//   };
-//   const disable = (on) => {
-//     $placeOrder.prop('disabled', !!on);
-//     $placeOrder.toggleClass('disabled', !!on);
-//   };
-
-//   async function oppioHandleSubscriptionSubmit(e) {
-//     // Zober si kontrolu nad submitom len pri predplatnom
-//     e.preventDefault();
-//     disable(true);
-
-//     try {
-//       // 1) PaymentMethod
-//       const billing = {
-//         name:
-//           (getVal('#billing_first_name') + ' ' + getVal('#billing_last_name')).trim(),
-//         email: getVal('#billing_email'),
-//         address: {
-//           line1: getVal('#billing_address_1'),
-//           line2: getVal('#billing_address_2'),
-//           city: getVal('#billing_city'),
-//           postal_code: getVal('#billing_postcode'),
-//           country: getVal('#billing_country'),
-//         },
-//       };
-//       const pmRes = await stripe.createPaymentMethod({
-//         type: 'card',
-//         card,
-//         billing_details: billing,
-//       });
-//       if (pmRes.error) throw new Error(pmRes.error.message || 'Zlyhalo vytvorenie karty.');
-
-//       // 2) Backend: vytvor subscription a vráť client_secret z invoice PI
-//       const fd = new FormData($form[0]);
-//       fd.append('action', 'oppio_create_subscription');
-//       fd.append('order_id', getVal('#oppio_order_id'));
-//       fd.append('customer_id', getVal('#oppio_customer_id'));
-//       fd.append('payment_method_id', pmRes.paymentMethod.id);
-
-//       const resp = await fetch(wc_checkout_params.ajax_url, { method: 'POST', body: fd });
-//       const json = await resp.json();
-
-//       if (!resp.ok || !json || json.success === false || json.status === 'error') {
-//         throw new Error(json?.message || 'Subscription create failed.');
-//       }
-
-//       const clientSecret = json.client_secret || json?.data?.client_secret;
-//       if (!clientSecret) throw new Error('Chýba client_secret z invoice PaymentIntent.');
-
-//       // 3) Potvrď PRESNE tento invoice PaymentIntent (3DS sa tu vyrieši)
-//       const confirm = await stripe.confirmCardPayment(clientSecret);
-//       if (confirm.error) throw new Error(confirm.error.message || 'Potvrdenie platby zlyhalo.');
-
-//       const piStatus = confirm.paymentIntent?.status;
-//       if (piStatus === 'succeeded' || piStatus === 'processing') {
-//         // 4) Redirect
-//         window.location.href =
-//           json.redirect ||
-//           json.success_url ||
-//           (window.location.origin + '/checkout/order-received/');
-//         return;
-//       }
-
-//       // iné edge stavy
-//       throw new Error('Platba čaká na doplnenie údajov.');
-//     } catch (err) {
-//       console.error('OPPIO subscription flow error:', err);
-//       showErr(err.message || String(err));
-//       disable(false);
-//     }
-//   }
-
-//   // Pripni sa na submit checkoutu (nechaj ostatné tvoje handleri bežať)
-//   $form.off('submit.oppioSub').on('submit.oppioSub', function (e) {
-//     // Pri non‑subscription nechaj Woo bežať ďalej
-//     if (!window.OPPIO_IS_SUBSCRIPTION) return;
-//     oppioHandleSubscriptionSubmit(e);
-//   });
-// })();
 // FE pre STRIPE - CHECKOUT FLOW
 (function () {
   if (!window.OPPIO_IS_SUBSCRIPTION) return;
@@ -958,164 +690,6 @@ function showCheckoutError(message) {
 }
 
 // ===== AUTO-CONFIRM PAYMENT INTENT NA THANKYOU PAGE =====
-// ===== AUTO-CONFIRM PAYMENT INTENT NA THANKYOU PAGE =====
-// jQuery(document).ready(function($) {
-//     console.log('=== DEBUG AUTO-CONFIRM ===');
-//     console.log('OPPIO_CLIENT_SECRET:', window.OPPIO_CLIENT_SECRET);
-//     console.log('OPPIO_STRIPE_PK:', window.OPPIO_STRIPE_PK);
-//     console.log('URL contains order-received:', window.location.href.includes('order-received'));
-    
-//     // Spustí sa len na thankyou page s client_secret
-//     if (window.OPPIO_CLIENT_SECRET && window.OPPIO_STRIPE_PK && window.location.href.includes('order-received')) {
-//         console.log('OPPIO: Thankyou page detected with client_secret, auto-confirming PaymentIntent...');
-        
-//         const stripe = Stripe(window.OPPIO_STRIPE_PK);
-        
-//         // ✅ ZMEŇ TOTO - použij univerzálnu metódu namiesto confirmCardPayment
-//         stripe.confirmPayment({
-//             clientSecret: window.OPPIO_CLIENT_SECRET,
-//             confirmParams: {
-//                 return_url: window.location.href // vráti sa na túto stránku
-//             }
-//         }).then(function(result) {
-//             if (result.error) {
-//                 console.error('OPPIO: PaymentIntent confirmation failed:', result.error);
-                
-//                 // ✅ FALLBACK: Ak universal nefunguje, skús card-specific
-//                 console.log('OPPIO: Trying fallback confirmCardPayment...');
-//                 return stripe.confirmCardPayment(window.OPPIO_CLIENT_SECRET);
-//             }
-//             return result;
-//         }).then(function(result) {
-//             if (result.error) {
-//                 console.error('OPPIO: All confirmation methods failed:', result.error);
-//                 alert('Potvrdenie platby zlyhalo: ' + result.error.message);
-//             } else {
-//                 console.log('OPPIO: PaymentIntent confirmed successfully!', result.paymentIntent);
-                
-//                 // Refresh page po úspechu
-//                 setTimeout(function() {
-//                     console.log('OPPIO: Refreshing page after successful confirmation...');
-//                     window.location.reload();
-//                 }, 2000);
-//             }
-//         }).catch(function(error) {
-//             console.error('OPPIO: Payment confirmation error:', error);
-//             alert('Chyba pri potvrdení platby: ' + error.message);
-//         });
-//     } else {
-//         console.log('OPPIO: Auto-confirm conditions not met');
-//         console.log('- Client secret exists:', !!window.OPPIO_CLIENT_SECRET);
-//         console.log('- Stripe PK exists:', !!window.OPPIO_STRIPE_PK);
-//         console.log('- Is thankyou page:', window.location.href.includes('order-received'));
-//     }
-
-//     console.log('=== DEBUG AUTO-CONFIRM END ===');
-// });
-// ===== AUTO-CONFIRM PAYMENT INTENT NA THANKYOU PAGE =====
-// ===== AKTUALIZOVANÝ AUTO-CONFIRM S LEPŠÍM ERROR HANDLING =====
-// ===== AUTO-CONFIRM PAYMENT INTENT NA THANKYOU PAGE =====
-/*
-jQuery(document).ready(function($) {
-    console.log('=== DEBUG AUTO-CONFIRM ===');
-    console.log('OPPIO_CLIENT_SECRET:', window.OPPIO_CLIENT_SECRET);
-    console.log('OPPIO_STRIPE_PK:', window.OPPIO_STRIPE_PK);
-    console.log('URL contains order-received:', window.location.href.includes('order-received'));
-    
-    // ✅ KONTROLA ČI UŽ BOLO SPRACOVANÉ
-    const processedKey = 'oppio_payment_processed_' + window.OPPIO_ORDER_ID;
-    const processed = sessionStorage.getItem(processedKey);
-
-    if (processed === 'success') {
-        console.log('OPPIO: Payment already successfully processed, showing final success');
-        showSuccessWithButton();
-        return;
-    } else if (processed === 'processing') {
-        console.log('OPPIO: Payment currently processing, skipping');
-        return;
-    } else if (processed === 'error') {
-        console.log('OPPIO: Payment previously failed, showing error');
-        showErrorMessage('Platba predtým zlyhala. Použite tlačidlo "Skúsiť znova".');
-        return;
-    }
-
-    // Spustí sa len na thankyou page s client_secret
-    if (window.OPPIO_CLIENT_SECRET && window.OPPIO_STRIPE_PK && window.location.href.includes('order-received')) {
-        console.log('OPPIO: Thankyou page detected with client_secret, auto-confirming PaymentIntent...');
-        console.log('OPPIO: Starting payment confirmation...');
-
-        // ✅ OZNAČ AKO PROCESSING
-        sessionStorage.setItem(processedKey, 'processing');
-
-        // Zobraz processing notifikáciu
-        showProcessingMessage('Dokončujeme vašu platbu...');
-        
-        const stripe = Stripe(window.OPPIO_STRIPE_PK);
-        
-        // ✅ PÔVODNÉ FUNGUJÚCE RIEŠENIE
-        stripe.confirmPayment({
-            clientSecret: window.OPPIO_CLIENT_SECRET,
-            confirmParams: {
-                return_url: window.location.href
-            }
-        }).then(function(result) {
-            console.log('OPPIO: confirmPayment result:', result);
-            hideProcessingMessage();
-            
-            if (result.error) {
-                console.error('OPPIO: PaymentIntent confirmation failed:', result.error);
-                
-                // ✅ FALLBACK: Ak universal nefunguje, skús card-specific
-                console.log('OPPIO: Trying fallback confirmCardPayment...');
-                showProcessingMessage('Skúšam alternatívnu metódu...');
-                
-                return stripe.confirmCardPayment(window.OPPIO_CLIENT_SECRET);
-            }
-            return result;
-        }).then(function(result) {
-            if (!result) return;
-            
-            console.log('OPPIO: Final result:', result);
-            hideProcessingMessage();
-            
-            if (result.error) {
-                console.error('OPPIO: All confirmation methods failed:', result.error);
-                showErrorMessage('Potvrdenie platby zlyhalo: ' + result.error.message);
-            } else {
-                console.log('OPPIO: PaymentIntent confirmed successfully!', result.paymentIntent);
-        
-                // ✅ OZNAČ AKO SUCCESS
-                sessionStorage.setItem(processedKey, 'success');
-
-                console.log('OPPIO: PaymentIntent confirmed successfully!', result.paymentIntent);
-                showSuccessMessage('Vaše predplatné bolo úspešne aktivované!');
-                
-                // Refresh page po úspechu
-                setTimeout(function() {
-                    console.log('OPPIO: Refreshing page after successful confirmation...');
-                    window.location.reload();
-                }, 3000);
-            }
-        }).catch(function(error) {
-            console.error('OPPIO: Payment confirmation error:', error);
-            hideProcessingMessage();
-              
-            // ✅ OZNAČ AKO ERROR (nie vymazať!)
-            sessionStorage.setItem('oppio_payment_processed_' + window.OPPIO_ORDER_ID, 'error');
-    
-            showErrorMessage('Chyba pri potvrdení platby: ' + error.message);
-        });
-    } else {
-        console.log('OPPIO: Auto-confirm conditions not met');
-        console.log('- Client secret exists:', !!window.OPPIO_CLIENT_SECRET);
-        console.log('- Stripe PK exists:', !!window.OPPIO_STRIPE_PK);
-        console.log('- Is thankyou page:', window.location.href.includes('order-received'));
-    }
-    
-    console.log('=== DEBUG AUTO-CONFIRM END ===');
-});
-*/
-// ===== AUTO-CONFIRM PAYMENT INTENT NA THANKYOU PAGE =====
 jQuery(document).ready(function($) {
     console.log('=== DEBUG AUTO-CONFIRM ===');
     console.log('OPPIO_CLIENT_SECRET:', window.OPPIO_CLIENT_SECRET);
@@ -1266,7 +840,6 @@ function showProcessingMessage(text) {
         document.head.appendChild(style);
     }
 }
-
 function showSuccessMessage(text) {
     hideAllMessages();
     jQuery('body').prepend(`
@@ -1339,7 +912,6 @@ function showSuccessWithButton() {
         </div>
     `);
 }
-
 function showErrorMessage(text) {
     hideAllMessages();
     jQuery('body').prepend(`
@@ -1397,7 +969,6 @@ function showErrorMessage(text) {
         </div>
     `);
 }
-
 function showWarningMessage(text) {
     hideAllMessages();
     jQuery('body').prepend(`
@@ -1434,7 +1005,6 @@ function showWarningMessage(text) {
         </div>
     `);
 }
-
 function hideAllMessages() {
     jQuery('#oppio-payment-overlay').remove();
     jQuery('#oppio-payment-status').remove();

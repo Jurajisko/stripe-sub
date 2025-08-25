@@ -2133,501 +2133,175 @@ public function thankyou_fallback_render(){
      * ✅ UNIVERZÁLNE RIEŠENIE PRE VŠETKY TYPY KARIET A SCA
      * Vytvorí Stripe subscription s automatickým SCA handling
      */
-    public function create_stripe_subscription_api_working($order, $customer_id, $payment_method_id) {
-        // Získaj Stripe API key
-        $stripe_settings = get_option('woocommerce_stripe_settings', array());
-        $test_mode = isset($stripe_settings['testmode']) && $stripe_settings['testmode'] === 'yes';
-        
-        if ($test_mode) {
-            $api_key = isset($stripe_settings['test_secret_key']) ? $stripe_settings['test_secret_key'] : '';
-        } else {
-            $api_key = isset($stripe_settings['secret_key']) ? $stripe_settings['secret_key'] : '';
+    public function create_stripe_subscription_api_working( $order, $customer_id, $payment_method_id ) {
+        /* -----------------------------------------------------
+        * 1) Stripe – inicializácia
+        * ----------------------------------------------------- */
+        $settings  = get_option( 'woocommerce_stripe_settings', [] );
+        $is_test   = ( $settings['testmode'] ?? 'no' ) === 'yes';
+        $api_key   = $is_test ? ( $settings['test_secret_key'] ?? '' )
+                            : ( $settings['secret_key']      ?? '' );
+
+        if ( ! $api_key ) {
+            $this->oppio_log( 'OPPIO: Missing Stripe API key' );
+            return [ 'error' => 'missing_api_key' ];
         }
 
-        if (empty($api_key)) {
-            $this->oppio_log('OPPIO: Missing Stripe API key');
-            return false;
-        }
-
-        // ✅ HELPER FUNKCIA PRE STABILNÉ IDEMPOTENCY KEYS
-        $oppio_idem = function($order_id, $step) {
-            return 'oppio-' . $order_id . '-' . $step;
+        \Stripe\Stripe::setApiKey( $api_key );
+        $order_id  = $order->get_id();
+        $idem_key  = static function ( $step ) use ( $order_id ) {
+            return "oppio-{$order_id}-{$step}";
         };
 
-        $headers = array(
-            'Authorization'     => 'Bearer ' . $api_key,
-            'Content-Type'      => 'application/x-www-form-urlencoded',
-            'Stripe-Version'    => '2024-06-20',
-            'Idempotency-Key'   => $oppio_idem($order->get_id(), 'product')
-        );
+        /* -----------------------------------------------------
+        * 2) Údaje o predplatnom
+        * ----------------------------------------------------- */
+        $subscription_type      = $order->get_meta( '_oppio_subscription_type' );
+        $subscription_frequency = $order->get_meta( '_oppio_subscription_frequency' );
+        $mode_label             = $is_test ? 'test' : 'live';
 
-        // Získaj subscription details
-        $subscription_type = $order->get_meta('_oppio_subscription_type');
-        $subscription_frequency = $order->get_meta('_oppio_subscription_frequency');
-        
-        $mode_label = $test_mode ? 'test' : 'live';
-        
-        // Výpočet intervalu
-        if ($subscription_type === 'biweekly') {
-            $interval = 'week';
-            $interval_count = 2; // každé 2 týždne = 14 dní
-        } 
-        elseif ($subscription_type === 'monthly') {
-            $interval = 'month';
-            $interval_count = 1;
-        } 
-        else {
-            $interval = 'day';
-            $interval_count = 1;
+        if ( $subscription_type === 'biweekly' ) {
+            $interval = 'week';  $interval_count = 2;
+        } elseif ( $subscription_type === 'monthly' ) {
+            $interval = 'month'; $interval_count = 1;
+        } else {
+            $interval = 'day';   $interval_count = 1;
         }
 
-        // Získaj prvý produkt z objednávky
-        $items = $order->get_items();
-        $first_item = reset($items);
-        $product = $first_item->get_product();
-        $quantity = $first_item->get_quantity();
-
-        // KROK 1: Vytvor Stripe Product
-        $product_data = array(
-            'name' => $product->get_name() . ' - ' . $subscription_type . ' predplatné',
-            'metadata' => array(
-                'woocommerce_product_id' => $product->get_id(),
-                'oppio_subscription_type' => $subscription_type,
-                'oppio_mode' => $mode_label
-            )
-        );
-
-        $product_response = wp_remote_post('https://api.stripe.com/v1/products', array(
-            'headers'   => $headers,
-            'body'      => http_build_query($product_data),
-            'timeout'   => 30
-        ));
-
-        if (is_wp_error($product_response)) {
-            $this->oppio_log('OPPIO: Product creation failed: ' . $product_response->get_error_message());
-            return false;
+        $items      = $order->get_items();
+        $first_item = reset( $items );
+        if ( ! $first_item ) {
+            return [ 'error' => 'missing_order_item' ];
         }
 
-        $product_body = wp_remote_retrieve_body($product_response);
-        $product_result = json_decode($product_body, true);
+        $product       = $first_item->get_product();
+        $quantity      = $first_item->get_quantity();
+        $price_per_unit = $this->calculate_subscription_price_without_coupon( $order, $subscription_type ) / $quantity;
 
-        if (wp_remote_retrieve_response_code($product_response) !== 200 || isset($product_result['error'])) {
-            $this->oppio_log('OPPIO: Product creation error: ' . $product_body);
-            return false;
-        }
-
-        $stripe_product_id = $product_result['id'];
-        $this->oppio_log('OPPIO: Stripe Product created: ' . $stripe_product_id);
-
-        // KROK 2: Vytvor Stripe Price
-        $subscription_price_per_unit = $this->calculate_subscription_price_without_coupon($order, $subscription_type) / $quantity;
-        $price_data = array(
-            'product' => $stripe_product_id,
-            'unit_amount'   => (int) round($subscription_price_per_unit * 100), // ✅ Správne zaokrúhlenie
-            'currency' => strtolower($order->get_currency()),
-            'recurring' => array(
-                'interval' => $interval,
-                'interval_count' => $interval_count
-            ),
-            'metadata' => array(
-                'woocommerce_order_id'       => $order->get_id(),
-                'oppio_subscription_type'    => $subscription_type,
-                'subscription_type'          => $subscription_type,
-                'oppio_mode'                 => $mode_label
-            )
-        );
-
-        $price_headers = $headers;
-        $price_headers['Idempotency-Key'] = $oppio_idem($order->get_id(), 'price');
-
-        $price_response = wp_remote_post('https://api.stripe.com/v1/prices', array(
-            'headers'   => $price_headers,
-            'body'      => http_build_query($price_data),
-            'timeout'   => 30
-        ));
-
-        if (is_wp_error($price_response)) {
-            $this->oppio_log('OPPIO: Price creation failed: ' . $price_response->get_error_message());
-            return false;
-        }
-
-        $price_body = wp_remote_retrieve_body($price_response);
-        $price_result = json_decode($price_body, true);
-
-        if (wp_remote_retrieve_response_code($price_response) !== 200 || isset($price_result['error'])) {
-            $this->oppio_log('OPPIO: Price creation error: ' . $price_body);
-            return false;
-        }
-
-        $price_id = $price_result['id'];
-        $this->oppio_log('OPPIO: Stripe Price created: ' . $price_id);
-
-        // ✅ KROK 3: PRIPOJ PAYMENT METHOD K CUSTOMER
-        $this->oppio_log('OPPIO: Attaching payment method ' . $payment_method_id . ' to customer ' . $customer_id);
-
-        $attach_data = array(
-            'customer' => $customer_id
-        );
-
-        $attach_headers = $headers;
-        $attach_headers['Idempotency-Key'] = $oppio_idem($order->get_id(), 'attach');
-
-        $attach_response = wp_remote_post('https://api.stripe.com/v1/payment_methods/' . $payment_method_id . '/attach', array(
-            'headers'   => $attach_headers,
-            'body'      => http_build_query($attach_data),
-            'timeout'   => 30
-        ));
-
-        if (is_wp_error($attach_response)) {
-            $this->oppio_log('OPPIO: Payment method attach failed: ' . $attach_response->get_error_message());
-            return false;
-        }
-
-        $attach_code = wp_remote_retrieve_response_code($attach_response);
-        $attach_body = wp_remote_retrieve_body($attach_response);
-        $attach_result = json_decode($attach_body, true);
-
-        $this->oppio_log('OPPIO: Payment method attach response code: ' . $attach_code);
-        $this->oppio_log('OPPIO: Payment method attach response: ' . $attach_body);
-
-        // Skontroluj či attach prebehlo úspešne
-        if ($attach_code !== 200) {
-            if ($attach_code === 400 && isset($attach_result['error']['code'])) {
-                $err = $attach_result['error']['code'];
-                if ($err === 'resource_already_exists') {
-                    $this->oppio_log('OPPIO: PM already attached to customer - set as default and continue');
-
-                    // ✅ Nastav default aj v tomto prípade
-                    $customer_update_headers = $headers;
-                    $customer_update_headers['Idempotency-Key'] = $oppio_idem($order->get_id(), 'customer-default');
-
-                    $resp = wp_remote_post('https://api.stripe.com/v1/customers/' . $customer_id, [
-                        'headers' => $customer_update_headers,
-                        'body'    => http_build_query([
-                            'invoice_settings[default_payment_method]' => $payment_method_id,
-                        ]),
-                        'timeout' => 30,
-                    ]);
-                    // (voliteľné) zaloguj výsledok:
-                    $this->oppio_log('OPPIO: Set default PM on customer (already attached) - code: ' .
-                        (int) wp_remote_retrieve_response_code($resp));
-
-                    // pokračuj ďalej
-                } elseif ($err === 'payment_method_unexpected_state') {
-                    $this->oppio_log('OPPIO: Payment method attached to different customer - require new card');
-                    return ['error' => 'payment_method_belongs_to_other_customer'];
-                } else {
-                    $this->oppio_log('OPPIO: Payment method attach failed: ' . $attach_body);
-                    return false;
-                }
-            } else {
-                $this->oppio_log('OPPIO: Payment method attach failed with code: ' . $attach_code . ' body: ' . $attach_body);
-                return false;
-            }
-        } 
-        else {
-            $this->oppio_log('OPPIO: Payment method successfully attached to customer');
-
-            // ✅ Nastav default PM (štandardný prípad po úspešnom attach)
-            $customer_update_headers = $headers;
-            $customer_update_headers['Idempotency-Key'] = $oppio_idem($order->get_id(), 'customer-default');
-
-            $resp = wp_remote_post('https://api.stripe.com/v1/customers/' . $customer_id, [
-                'headers' => $customer_update_headers,
-                'body'    => http_build_query([
-                    'invoice_settings[default_payment_method]' => $payment_method_id,
-                ]),
-                'timeout' => 30,
-            ]);
-            // (voliteľné) zaloguj výsledok:
-            $this->oppio_log('OPPIO: Set default PM on customer - code: ' .
-                (int) wp_remote_retrieve_response_code($resp));
-        }
-
-
-        // ✅ 100% zľava iba na PRVÝ invoice (bez trialu)
-        $first_order_coupon_id = 'first_order_free'; // <- TU daj svoje skutočné ID kupónu zo Stripe
-        $this->oppio_log('OPPIO: Applying one-time 100% coupon on first invoice: ' . $first_order_coupon_id);
-
-        // ✅ KROK 4: VYTVOR SUBSCRIPTION S SCA PODPOROU
-        // ✅ KROK 4: VYTVOR SUBSCRIPTION S IHNED SUBSCRIBE
-        $subscription_data = array(
-            'customer' => $customer_id,
-            'default_payment_method' => $payment_method_id,
-            
-            // ✅ IHNED SUBSCRIBE - OKAMŽITÉ STIAHNUTIE PRVEJ PLATBY
-            'payment_behavior' => 'default_incomplete',
-            'collection_method' => 'charge_automatically',
-            
-            // ✅ NOVÉ: 100% ZĽAVA IBA NA PRVÝ INVOICE (žiadny trial)
-            'discounts' => [
-                [
-                    'coupon' => $first_order_coupon_id, // napr. 'first_order_free'
+        /* -----------------------------------------------------
+        * 3) Vytvor Stripe Product a Price
+        * ----------------------------------------------------- */
+        $stripe_product = \Stripe\Product::create(
+            [
+                'name'     => $product->get_name() . ' - ' . $subscription_type . ' subscription',
+                'metadata' => [
+                    'woocommerce_product_id'  => $product->get_id(),
+                    'oppio_subscription_type' => $subscription_type,
+                    'oppio_mode'              => $mode_label,
                 ],
             ],
-
-            // ⬇️ NOVÉ – nech Stripe uloží kartu pre obnovy
-            'payment_settings' => [
-                'save_default_payment_method' => 'on_subscription',
-            ],
-
-            // ✅ ROZŠÍR RESPONSE aby sme videli PaymentIntent
-            'expand' => [
-                'latest_invoice.payment_intent',
-                'latest_invoice.subscription'
-            ],
-            
-            'items' => array(
-                array(
-                    'price'     => $price_id,
-                    'quantity'  => $quantity
-                )
-            ),
-            'metadata' => array(
-                'woocommerce_order_id'          => $order->get_id(),
-                'oppio_subscription_type'       => $subscription_type,
-                'oppio_subscription_frequency'  => $subscription_frequency,
-                'oppio_customer_email'          => $order->get_billing_email(),
-                'oppio_mode'                    => $mode_label,
-                'oppio_site_url'                => get_site_url(),
-                'oppio_site_locale'             => get_locale(),
-                'oppio_currency'                => $order->get_currency(),
-                'oppio_country'                 => $order->get_billing_country(),
-                'oppio_product_id'              => $product->get_id(),
-                'oppio_price_id'                => $price_id
-            )
+            [ 'idempotency_key' => $idem_key( 'product' ) ]
         );
 
-        $this->oppio_log('OPPIO: Creating Stripe Subscription with SCA support: ' . print_r($subscription_data, true));
+        $stripe_price = \Stripe\Price::create(
+            [
+                'product'     => $stripe_product->id,
+                'unit_amount' => (int) round( $price_per_unit * 100 ),
+                'currency'    => strtolower( $order->get_currency() ),
+                'recurring'   => [
+                    'interval'       => $interval,
+                    'interval_count' => $interval_count,
+                ],
+                'metadata'    => [
+                    'woocommerce_order_id'   => $order_id,
+                    'oppio_subscription_type'=> $subscription_type,
+                    'oppio_mode'             => $mode_label,
+                ],
+            ],
+            [ 'idempotency_key' => $idem_key( 'price' ) ]
+        );
 
-        $subscription_headers = $headers;
-        $subscription_headers['Idempotency-Key'] = $oppio_idem($order->get_id(), 'subscription');
+        /* -----------------------------------------------------
+        * 4) Pripoj PM k zákazníkovi a nastav ako default
+        * ----------------------------------------------------- */
+        \Stripe\PaymentMethod::attach( $payment_method_id, [ 'customer' => $customer_id ] );
+        \Stripe\Customer::update(
+            $customer_id,
+            [ 'invoice_settings' => [ 'default_payment_method' => $payment_method_id ] ],
+            [ 'idempotency_key' => $idem_key( 'customer-default' ) ]
+        );
 
-        $subscription_response = wp_remote_post('https://api.stripe.com/v1/subscriptions', array(
-            'headers'   => $subscription_headers,
-            'body'      => http_build_query($subscription_data),
-            'timeout'   => 30
-        ));
+        /* -----------------------------------------------------
+        * 5) Vytvor Subscription s podporou 3DS
+        * ----------------------------------------------------- */
 
-        if (is_wp_error($subscription_response)) {
-            $this->oppio_log('OPPIO: Subscription creation failed: ' . $subscription_response->get_error_message());
-            return false;
+        $subscription = \Stripe\Subscription::create(
+            [
+                'customer'               => $customer_id,
+                'default_payment_method' => $payment_method_id,
+                'items'                  => [
+                    [ 'price' => $stripe_price->id, 'quantity' => $quantity ],
+                ],
+                'payment_behavior'       => 'default_incomplete',
+                'collection_method'      => 'charge_automatically',
+                'payment_settings'       => [ 'save_default_payment_method' => 'on_subscription' ],
+                'expand'                 => [ 'latest_invoice.payment_intent' ],
+                'metadata'               => [
+                    'woocommerce_order_id'         => $order_id,
+                    'oppio_subscription_type'      => $subscription_type,
+                    'oppio_subscription_frequency' => $subscription_frequency,
+                    'oppio_customer_email'         => $order->get_billing_email(),
+                    'oppio_mode'                   => $mode_label,
+                    'oppio_site_url'               => get_site_url(),
+                    'oppio_site_locale'            => get_locale(),
+                    'oppio_currency'               => $order->get_currency(),
+                    'oppio_country'                => $order->get_billing_country(),
+                    'oppio_product_id'             => $product->get_id(),
+                    'oppio_price_id'               => $stripe_price->id,
+                ],
+            ],
+            [ 'idempotency_key' => $idem_key( 'subscription' ) ]
+        );
+
+        /* -----------------------------------------------------
+        * 6) Spracuj PaymentIntent a ulož meta
+        * ----------------------------------------------------- */
+        $pi = $subscription->latest_invoice->payment_intent;
+
+        $order->update_meta_data( '_oppio_stripe_subscription_id',  $subscription->id );
+        $order->update_meta_data( '_oppio_subscription_status',     $subscription->status );
+        $order->update_meta_data( '_oppio_stripe_invoice_id',       $subscription->latest_invoice->id );
+        $order->update_meta_data( '_oppio_stripe_pi_id',            $pi->id );
+        $order->update_meta_data( '_oppio_stripe_payment_intent_secret', $pi->client_secret );
+        if ( ! empty( $pi->next_action->redirect_to_url->url ) ) {
+            $order->update_meta_data( '_oppio_sca_redirect_url', $pi->next_action->redirect_to_url->url );
         }
-
-        $response_code = wp_remote_retrieve_response_code($subscription_response);
-        $body = wp_remote_retrieve_body($subscription_response);
-        $result = json_decode($body, true);
-
-        // Po úspešnom vytvorení subscribe ulož ID-čka
-        // === ULOŽ DÔLEŽITÉ META, ABY SA DALA PLATBA DOKONČIŤ ===
-        $sub_id      = $result['id'] ?? '';
-        $sub_status  = isset($result['status']) ? strtolower(trim((string)$result['status'])) : '';
-        $invoice_id  = $result['latest_invoice']['id'] ?? '';
-        $pi          = $result['latest_invoice']['payment_intent'] ?? [];
-        $pi_id       = $pi['id'] ?? '';
-        $pi_secret   = $pi['client_secret'] ?? '';
-        $sca_url     = $pi['next_action']['redirect_to_url']['url'] ?? '';
-
-        if ($sub_id !== '')      { $order->update_meta_data('_oppio_stripe_subscription_id', $sub_id); }
-        if ($sub_status !== '')  { $order->update_meta_data('_oppio_subscription_status', $sub_status); }
-        if ($invoice_id !== '')  { $order->update_meta_data('_oppio_stripe_invoice_id', $invoice_id); }
-        if ($pi_id !== '')       { $order->update_meta_data('_oppio_stripe_pi_id', $pi_id); }
-        if ($pi_secret !== '')   { $order->update_meta_data('_oppio_stripe_payment_intent_secret', $pi_secret); }
-        if ($sca_url !== '')     { $order->update_meta_data('_oppio_sca_redirect_url', $sca_url); }
-
         $order->save();
 
-
-        $this->oppio_log('OPPIO: Stripe Subscription API response code: ' . $response_code);
-        $this->oppio_log('OPPIO: Stripe Subscription API response body: ' . $body);
-
-        if ($response_code !== 200) {
-            $this->oppio_log('OPPIO: Subscription API HTTP error code: ' . $response_code);
-            return false;
-        }
-
-        if (isset($result['error'])) {
-            $this->oppio_log('OPPIO: Stripe subscription error: ' . $result['error']['message']);
-            if (isset($result['error']['code'])) {
-                $this->oppio_log('OPPIO: Stripe error code: ' . $result['error']['code']);
-            }
-            return false;
-        }
-
-        // ✅ KROK 5: SKONTROLUJ SCA STAV A SPRACUJ
-        $subscription_status = $result['status'];
-        $this->oppio_log('OPPIO: Subscription created with status: ' . $subscription_status);
-
-        if (empty($result['latest_invoice']['payment_intent']['client_secret'])) {
-            $this->oppio_log('OPPIO: MISSING payment_intent.client_secret in subscription creation');
+        /* -----------------------------------------------------
+        * 7) Vyhodnoť stav a vráť odpoveď
+        * ----------------------------------------------------- */
+        if ( in_array( $pi->status, [ 'requires_action', 'requires_confirmation' ], true ) ) {
             return [
-                'status' => 'error',
-                'message' => 'Platobný proces sa nepodarilo inicializovať. Skúste znova.',
+                'id'               => $subscription->id,
+                'status'           => 'incomplete',
+                'requires_action'  => true,
+                'client_secret'    => $pi->client_secret,
+                'payment_intent_id'=> $pi->id,
+                'success_url'      => $order->get_checkout_order_received_url(),
             ];
         }
 
-        // Skontroluj či potrebuje ďalšiu autentifikáciu
-        if ($subscription_status === 'incomplete') {
-            $this->oppio_log('OPPIO: Subscription is incomplete - checking payment intent');
-            
-            // Skontroluj PaymentIntent stav
-            if (isset($result['latest_invoice']['payment_intent'])) {
-                $payment_intent = $result['latest_invoice']['payment_intent'];
-                $pi_status = $payment_intent['status'];
-                
-                $this->oppio_log('OPPIO: PaymentIntent status: ' . $pi_status);
-                
-                if ($pi_status === 'requires_action') {
-                    $this->oppio_log('OPPIO: PaymentIntent requires action (3D Secure)');
-                    
-                    // Uložme client_secret pre frontend handling
-                    $client_secret = $payment_intent['client_secret'];
-                    $order->update_meta_data('_oppio_stripe_payment_intent_secret', $client_secret);
-                    $order->update_meta_data('_oppio_stripe_subscription_incomplete', 'yes');
-                    $order->update_meta_data('_oppio_stripe_subscription_id', $result['id']); // ✅ Ulož subscription ID
-                    $order->update_meta_data('_oppio_stripe_payment_intent_id', $payment_intent['id']); // ✅ Ulož PI ID
-                    $order->add_order_note('⚠️ Subscription vyžaduje dodatočnú autentifikáciu (3D Secure)');
-                    $order->save();
-
-                    // ⬇️ NOVÉ – ulož aj priamy 3DS link, nech vieš zobraziť "Dokončiť overenie"
-                    $sca_url = $payment_intent['next_action']['redirect_to_url']['url'] ?? '';
-                    if ($sca_url !== '') { $order->update_meta_data('_oppio_sca_redirect_url', $sca_url); }
-                    $order->update_meta_data('_oppio_subscription_status', 'incomplete');
-                    $order->save();
-
-                    // Vratíme partial success s dodatočnými info
-                    return array(
-                        'id'               => $result['id'],
-                        'status'           => 'incomplete',
-                        'requires_action'  => true,
-                        'client_secret'    => $client_secret,
-                        'payment_intent_id'=> $payment_intent['id'],
-                        // kam presmerovať po úspešnom 3DS
-                        'success_url'      => $order->get_checkout_order_received_url(),
-                    );
-
-                } 
-                elseif ($pi_status === 'requires_confirmation') {
-                    $client_secret = $payment_intent['client_secret'] ?? null;
-                    return [
-                        'id'               => $result['id'],
-                        'status'           => 'incomplete',
-                        'requires_action'  => true,
-                        'client_secret'    => $client_secret,
-                        'payment_intent_id'=> $payment_intent['id'],
-                        'success_url'      => $order->get_checkout_order_received_url(),
-                    ];
-
-                } elseif ($pi_status === 'requires_payment_method') {
-                    // (3DS zlyhalo)
-                    $this->oppio_log('OPPIO: PaymentIntent requires new payment method - SCA failed');
-                    $retry_url = $this->oppio_handle_requires_payment_method($order, $result['latest_invoice']['payment_intent'] ?? array());
-
-                    // vyčisti starý client_secret, aby sa nerecykloval ten istý PI
-                    $order->delete_meta_data('_oppio_stripe_payment_intent_secret');
-                    $order->save();
-
-                    return array(
-                        'status'     => 'requires_payment_method',
-                        // Woo „order-pay“ URL – nový pokus vytvorí nový PaymentIntent
-                        'retry_url'  => $order->get_checkout_payment_url(true),
-                        'message'    => '3D Secure overenie zlyhalo, skúste znova s novou kartou.',
-                    );
-                    
-                } elseif ($pi_status === 'succeeded' || $pi_status === 'processing') {
-                    $this->oppio_log('OPPIO: PaymentIntent succeeded - subscription should be active soon');
-                    $order->add_order_note('✅ Stripe subscription vytvorené (čaká na aktiváciu): ' . $result['id']);
-                    
-                    $this->oppio_sync_latest_pm($customer_id, $payment_method_id, $result['id'] ?? null);
-                
-                    // Poisti sa, že máme aktuálny stav objednávky
-                    $order = wc_get_order( $order->get_id() );
-
-                    /*
-                    // Pošli notifikácie len raz
-                    if ( $order && $order->has_status( array( 'processing', 'completed' ) ) && 'yes' !== $order->get_meta('_oppio_processing_mail_sent') ) {
-                        try {
-                            $mailer = WC()->mailer();
-                            $emails = is_object( $mailer ) ? $mailer->get_emails() : array();
-
-                            // Zákazník: "Objednávka spracovávaná"
-                            if ( isset( $emails['WC_Email_Customer_Processing_Order'] ) ) {
-                                $emails['WC_Email_Customer_Processing_Order']->trigger( $order->get_id() );
-                            }
-
-                            // Admin: "Nová objednávka"
-                            if ( isset( $emails['WC_Email_New_Order'] ) ) {
-                                $emails['WC_Email_New_Order']->trigger( $order->get_id() );
-                            }
-
-                            // Zamedz duplicitám
-                            $order->update_meta_data( '_oppio_processing_mail_sent', 'yes' );
-                            $order->save();
-
-                            $this->oppio_log( 'OPPIO: Transactional emails triggered (processing/completed) for order ' . $order->get_id() );
-                        } catch ( \Throwable $e ) {
-                            $this->oppio_log( 'OPPIO: Email trigger error: ' . $e->getMessage() );
-                        }
-                    }
-                        */
-
-                    return array(
-                        'success'     => true,
-                        'redirect'    => $order->get_checkout_order_received_url(),
-                        'subscription_id' => $result['id'] ?? null,
-                    );
-
-                } else {
-                    $this->oppio_log('OPPIO: PaymentIntent failed with status: ' . $pi_status);
-                    $order->add_order_note('❌ Subscription payment failed: ' . $pi_status);
-                    return false;
-                }
-            }
-            
-        } 
-        elseif ($subscription_status === 'active') {
-            $this->oppio_log('OPPIO: Subscription is immediately active');
-            $order->add_order_note('✅ Stripe subscription úspešne vytvorené a aktivované: ' . $result['id']);
-            
-            $pi = $result['latest_invoice']['payment_intent'];
-
-            $this->oppio_sync_latest_pm($customer_id, $payment_method_id, $result['id'] ?? null);
-
+        if ( $pi->status === 'requires_payment_method' ) {
+            $order->add_order_note( '⚠️ 3D Secure failed – requires new card.' );
             return [
-                'success'         => true,
-                'subscription_id' => $result['id'],
-                'invoice_id'      => $result['latest_invoice']['id'],
-                'client_secret'   => $pi['client_secret'],
-                'redirect'        => $order->get_checkout_order_received_url()
+                'status'    => 'requires_payment_method',
+                'retry_url' => $order->get_checkout_payment_url( true ),
+                'message'   => '3D Secure overenie zlyhalo, skúste znova.',
             ];
-
-        } 
-        elseif ($subscription_status === 'trialing') {
-            $this->oppio_log('OPPIO: Subscription is in trial period');
-            $order->add_order_note('✅ Stripe subscription v skúšobnom období: ' . $result['id']);
-            
-            $pi = $result['latest_invoice']['payment_intent'];
-
-            $this->oppio_sync_latest_pm($customer_id, $payment_method_id, $result['id'] ?? null);
-
-            return [
-                'success'         => true,
-                'subscription_id' => $result['id'],
-                'invoice_id'      => $result['latest_invoice']['id'],
-                'client_secret'   => $pi['client_secret'],
-                'redirect'        => $order->get_checkout_order_received_url()
-            ];
-
-            
-        } 
-        else {
-            $this->oppio_log('OPPIO: Unexpected subscription status: ' . $subscription_status);
-            $order->add_order_note('⚠️ Subscription vytvorené s neočakávaným stavom: ' . $subscription_status);
         }
 
-        $this->oppio_log('OPPIO: Stripe subscription created successfully: ' . $result['id']);
-        return $result;
+        $order->add_order_note( '✅ Stripe subscription vytvorené: ' . $subscription->id );
+
+        return [
+            'success'         => true,
+            'subscription_id' => $subscription->id,
+            'invoice_id'      => $subscription->latest_invoice->id,
+            'client_secret'   => $pi->client_secret,
+            'redirect'        => $order->get_checkout_order_received_url(),
+        ];
     }
+
 
     /**
      * Pokúsi sa nájsť Stripe subscription pre danú objednávku a uložiť ho do meta.
@@ -2839,29 +2513,33 @@ public function thankyou_fallback_render(){
      * AJAX endpoint pre vytvorenie Stripe Subscription
      */
     public function ajax_create_subscription() {
-        // Bez nonce a bez prísnych kontrol – pridaj si podľa potreby
-        $order_id         = isset($_POST['order_id']) ? absint($_POST['order_id']) : 0;
+        // 1) Vstupné dáta
+        $order_id         = absint($_POST['order_id'] ?? 0);
         $customer_id      = sanitize_text_field($_POST['customer_id'] ?? '');
-        $payment_method_id= sanitize_text_field($_POST['payment_method_id'] ?? '');
+        $payment_method   = sanitize_text_field($_POST['payment_method_id'] ?? '');
 
-        if (!$order_id || !$payment_method_id || !$customer_id) {
-            wp_send_json_error(array('message' => 'Missing input'), 400);
+        if (!$order_id || !$customer_id || !$payment_method) {
+            wp_send_json_error(['message' => 'Missing input'], 400);
         }
 
         $order = wc_get_order($order_id);
         if (!$order) {
-            wp_send_json_error(array('message' => 'Order not found'), 404);
+            wp_send_json_error(['message' => 'Order not found'], 404);
         }
 
-        $res = $this->create_stripe_subscription_api_working($order, $customer_id, $payment_method_id);
+        // 2) Vytvor subscription – žiadny samostatný one‑time charge
+        $resp = $this->create_stripe_subscription_api_working(
+            $order,
+            $customer_id,
+            $payment_method
+        );
 
-        if (is_array($res)) {
-            // POZOR: vraciame priamo to, čo JS patch očakáva
-            wp_send_json($res);
+        if (!$resp || isset($resp['error'])) {
+            wp_send_json_error(['message' => 'Subscription creation failed'], 500);
         }
 
-        // fallback
-        wp_send_json_error(array('message' => 'Subscription creation failed'), 500);
+        // 3) Odpoveď obsahuje buď redirect (bez 3DS) alebo údaje pre 3DS
+        wp_send_json($resp);
     }
 
     /**
