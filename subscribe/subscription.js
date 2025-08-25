@@ -1049,3 +1049,35 @@ function hideProcessingMessage() {
 
   window.oppioHandleServerResponse = handleOppioResponse;
 })(jQuery);
+
+
+
+// ✅ PRIDAJTE TIETO 3 RIADKY NA ÚPLNÝ KONIEC VÁŠHO subscription.js
+
+// Rozšírenie pre Setup Intent handling
+(function() {
+    const originalHandler = window.oppioHandleServerResponse;
+    if (originalHandler) {
+        window.oppioHandleServerResponse = function(resp) {
+            // Nové: Setup Intent handling pre 3DS
+            if (resp && resp.mode === 'confirm_setup_intent') {
+                const stripe = window.Stripe ? window.Stripe(window.OPPIO_STRIPE_PK) : null;
+                if (stripe && resp.client_secret) {
+                    showProcessingMessage('Overujeme kartu pre budúce platby...');
+                    stripe.confirmCardSetup(resp.client_secret).then(function(result) {
+                        hideProcessingMessage();
+                        if (result.error) {
+                            showErrorMessage('3D Secure overenie zlyhalo: ' + result.error.message);
+                        } else {
+                            showSuccessMessage('Karta overená! Presmerovávame...');
+                            setTimeout(() => window.location.href = resp.success_url, 1500);
+                        }
+                    });
+                }
+                return;
+            }
+            // Pôvodné handling
+            return originalHandler(resp);
+        };
+    }
+})();
