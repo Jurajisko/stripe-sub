@@ -582,7 +582,8 @@ document.addEventListener('click', async function (e) {
 
     // nonce posielame zo servera v oppio_account_ajax.sca_nonce
     if (window.oppio_account_ajax && oppio_account_ajax.sca_nonce) {
-      form.append('_wpnonce', oppio_account_ajax.sca_nonce);
+      form.append('sca_nonce', oppio_account_ajax.sca_nonce);
+
     }
 
     const ajaxUrl =
